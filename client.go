@@ -150,7 +150,6 @@ func (c *Client) copyFile(resp *Response) stateFunc {
 // If an error occurs during any of the file transfers it will be accessible via
 // the associated Response.Err function.
 func (c *Client) DoChannel(reqch <-chan *Request, respch chan<- *Response) {
-	// TODO: enable cancelling of batch jobs
 	for req := range reqch {
 		resp := c.Do(req)
 		respch <- resp
@@ -266,11 +265,6 @@ func (c *Client) statFileInfo(resp *Response) stateFunc {
 // If the local file is smaller than the remote file and the remote server is
 // known to support ranged requests, the next stateFunc is getRequest.
 func (c *Client) validateLocal(resp *Response) stateFunc {
-	if resp.Request.SkipExisting {
-		resp.err = ErrFileExists
-		return c.closeResponse
-	}
-
 	// determine expected file size
 	size := resp.Request.Size
 	if size == 0 && resp.HTTPResponse != nil {
@@ -284,10 +278,6 @@ func (c *Client) validateLocal(resp *Response) stateFunc {
 		resp.DidResume = true
 		resp.bytesResumed = resp.fi.Size()
 		return c.checksumFile
-	}
-
-	if resp.Request.NoResume {
-		return c.getRequest
 	}
 
 	if size < resp.fi.Size() {
@@ -335,6 +325,9 @@ func (c *Client) checksumFile(resp *Response) stateFunc {
 	return c.closeResponse
 }
 
+// getRequest makes an HTTP GET request to the server, and observes the response. If the
+// response code is within the 2xx range, readResponse processes it and continues its work
+// accordingly.
 func (c *Client) getRequest(resp *Response) stateFunc {
 	resp.HTTPResponse, resp.err = c.doHTTPRequest(resp.Request.HTTPRequest)
 	if resp.err != nil {
@@ -352,6 +345,13 @@ func (c *Client) getRequest(resp *Response) stateFunc {
 	return c.readResponse
 }
 
+// readResponse first checks if the size of the response obtained is as expected. If this
+// is not the case, the response gets closed.
+//
+// Thereafter, it attempts to get the filename from the response header. Afterwards, the
+// function checks if the file download can be resumed from the point at which it had been
+// left off.
+// TODO complete documentation
 func (c *Client) readResponse(resp *Response) stateFunc {
 	if resp.HTTPResponse == nil {
 		panic("Response.HTTPResponse is not ready")
@@ -489,6 +489,19 @@ func (c *Client) doHTTPRequest(req *http.Request) (*http.Response, error) {
 	return c.HTTPClient.Do(req)
 }
 
+// headRequest attempts to obtain the capabilities of the server by making a HEAD request.
+//
+// If resp.optionsKnown is true, the HEAD request has been completed, and the capabilities
+// of the remote server are known. In which case, a GET request is made.
+//
+// Request.NoResume checks if the file being requested to download needs to be resumed, or
+// downloaded from the the beginning. If it requires to be downloaded from the beginning, a
+// GET request is made.
+//
+// If the destination path is already known and does not exist, a GET request is made.
+//
+// Finally, a HEAD request is made to get information about the server, and makes a GET
+// request with the information obtained.
 func (c *Client) headRequest(resp *Response) stateFunc {
 	if resp.optionsKnown {
 		return c.getRequest
@@ -500,7 +513,6 @@ func (c *Client) headRequest(resp *Response) stateFunc {
 	}
 
 	if resp.Filename != "" && resp.fi == nil {
-		// destination path is already known and does not exist
 		return c.getRequest
 	}
 

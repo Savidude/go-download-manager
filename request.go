@@ -7,10 +7,10 @@ import (
 	"net/url"
 )
 
-// A Hook is a user provided callback function that can be called by grab at
-// various stages of a requests lifecycle. If a hook returns an error, the
-// associated request is canceled and the same error is returned on the Response
-// object.
+// A Hook is a user provided callback function that can be called by the download
+// manager at various stages of a requests lifecycle. If a hook returns an error,
+// the associated request is canceled and the same error is returned on the
+// Response  object.
 //
 // Hook functions are called synchronously and should never block unnecessarily.
 // Response methods that block until a download is complete, such as
@@ -20,14 +20,6 @@ type Hook func(*Response) error
 
 // A Request represents an HTTP file transfer request to be sent by a Client.
 type Request struct {
-	// Label is an arbitrary string which may used to label a Request with a
-	// user friendly name.
-	Label string
-
-	// Tag is an arbitrary interface which may be used to relate a Request to
-	// other data.
-	Tag interface{}
-
 	// HTTPRequest specifies the http.Request to be sent to the remote server to
 	// initiate a file transfer. It includes request configuration such as URL,
 	// protocol version, HTTP method, request headers and authentication.
@@ -41,11 +33,6 @@ type Request struct {
 	// directory.
 	Filename string
 
-	// SkipExisting specifies that ErrFileExists should be returned if the
-	// destination path already exists. The existing file will not be checked for
-	// completeness.
-	SkipExisting bool
-
 	// NoResume specifies that a partially completed download will be restarted
 	// without attempting to resume any existing file. If the download is already
 	// completed in full, it will not be restarted.
@@ -56,9 +43,9 @@ type Request struct {
 	// exist.
 	NoCreateDirectories bool
 
-	// IgnoreBadStatusCodes specifies that grab should accept any status code in
-	// the response from the remote server. Otherwise, grab expects the response
-	// status code to be within the 2XX range (after following redirects).
+	// IgnoreBadStatusCodes specifies that the download manager should accept any
+	// status code in the response from the remote server. Otherwise, grab expects
+	// the response status code to be within the 2XX range (after following redirects).
 	IgnoreBadStatusCodes bool
 
 	// IgnoreRemoteTime specifies that grab should not attempt to set the

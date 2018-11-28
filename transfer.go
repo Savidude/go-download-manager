@@ -7,50 +7,50 @@ import (
 )
 
 type transfer struct {
-	n   int64 // must be 64bit aligned on 386
-	ctx context.Context
-	lim RateLimiter
-	w   io.Writer
-	r   io.Reader
-	b   []byte
+	n      int64 // must be 64bit aligned on 386
+	ctx    context.Context
+	lim    RateLimiter
+	writer io.Writer
+	reader io.Reader
+	b      []byte
 }
 
 func newTransfer(ctx context.Context, lim RateLimiter, dst io.Writer, src io.Reader, buf []byte) *transfer {
 	return &transfer{
-		ctx: ctx,
-		lim: lim,
-		w:   dst,
-		r:   src,
-		b:   buf,
+		ctx:    ctx,
+		lim:    lim,
+		writer: dst,
+		reader: src,
+		b:      buf,
 	}
 }
 
-// copy behaves similarly to io.CopyBuffer except that it checks for cancelation
+// copy behaves similarly to io.CopyBuffer except that it checks for cancellation
 // of the given context.Context and reports progress in a thread-safe manner.
-func (c *transfer) copy() (written int64, err error) {
-	if c.b == nil {
-		c.b = make([]byte, 32*1024)
+func (t *transfer) copy() (written int64, err error) {
+	if t.b == nil {
+		t.b = make([]byte, 32*1024)
 	}
 	for {
 		select {
-		case <-c.ctx.Done():
-			err = c.ctx.Err()
+		case <-t.ctx.Done():
+			err = t.ctx.Err()
 			return
 		default:
 			// keep working
 		}
-		if c.lim != nil {
-			err = c.lim.WaitN(c.ctx, len(c.b))
+		if t.lim != nil {
+			err = t.lim.WaitN(t.ctx, len(t.b))
 			if err != nil {
 				return
 			}
 		}
-		nr, er := c.r.Read(c.b)
+		nr, er := t.reader.Read(t.b)
 		if nr > 0 {
-			nw, ew := c.w.Write(c.b[0:nr])
+			nw, ew := t.writer.Write(t.b[0:nr])
 			if nw > 0 {
 				written += int64(nw)
-				atomic.StoreInt64(&c.n, written)
+				atomic.StoreInt64(&t.n, written)
 			}
 			if ew != nil {
 				err = ew
@@ -72,10 +72,10 @@ func (c *transfer) copy() (written int64, err error) {
 }
 
 // N returns the number of bytes transferred.
-func (c *transfer) N() (n int64) {
-	if c == nil {
+func (t *transfer) N() (n int64) {
+	if t == nil {
 		return 0
 	}
-	n = atomic.LoadInt64(&c.n)
+	n = atomic.LoadInt64(&t.n)
 	return
 }
