@@ -5,6 +5,25 @@ import (
 	"os"
 )
 
+// Get sends a HTTP request and downloads the content of the requested URL to
+// the given destination file path. The caller is blocked until the download is
+// completed, successfully or otherwise.
+//
+// An error is returned if caused by client policy (such as CheckRedirect), or
+// if there was an HTTP protocol or IO error.
+//
+// For non-blocking calls or control over HTTP client headers, redirect policy,
+// and other settings, create a Client instead.
+func Get(dst, urlStr string) (*Response, error) {
+	req, err := NewRequest(dst, urlStr)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := DefaultClient.Do(req)
+	return resp, resp.Err()
+}
+
 // GetBatch sends multiple HTTP requests and downloads the content of the
 // requested URLs to the given destination directory using the given number of
 // concurrent worker goroutines.
