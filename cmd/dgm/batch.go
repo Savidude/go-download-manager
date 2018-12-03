@@ -2,10 +2,9 @@ package main
 
 import (
 	"fmt"
+	"github.com/Savidude/go-download-manager"
 	"os"
 	"time"
-
-	"github.com/Savidude/go-download-manager"
 )
 
 var (
@@ -20,12 +19,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: %s [url]...\n", os.Args[0])
 		os.Exit(1)
 	}
-	//urls := os.Args[1:]
-	urls := []string{"http://192.168.58.92/file/wso2am-2.6.0.zip", "http://192.168.58.92/file/wso2am-2.5.0.zip", "http://192.168.58.92/file/wso2am-analytics-2.5.0.zip"}
+
+	urls := os.Args[1:]
 
 	// start file downloads, 3 at a time
 	fmt.Printf("Downloading %d files...\n", len(urls))
-	respch, err := go_download_manager.GetBatch(3, ".", urls...)
+	start := time.Now()
+	respch, err := go_download_manager.GetBatch(4, "./downloads", urls...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
@@ -60,6 +60,8 @@ Loop:
 		succeeded,
 		failed,
 		inProgress)
+	elapsed := time.Since(start)
+	fmt.Printf("Download took %s", elapsed)
 
 	// return the number of failed downloads as exit code
 	os.Exit(failed)

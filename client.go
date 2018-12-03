@@ -351,7 +351,9 @@ func (c *Client) getRequest(resp *Response) stateFunc {
 // Thereafter, it attempts to get the filename from the response header. Afterwards, the
 // function checks if the file download can be resumed from the point at which it had been
 // left off.
-// TODO complete documentation
+//
+// Finally, it calls the openWriter function which creates the file at the specified
+// destination.
 func (c *Client) readResponse(resp *Response) stateFunc {
 	if resp.HTTPResponse == nil {
 		panic("Response.HTTPResponse is not ready")
