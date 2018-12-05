@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,13 +69,12 @@ func (c *Client) Do(req *Request) *Response {
 	// cancel will be called on all code-paths via closeResponse
 	ctx, cancel := context.WithCancel(req.Context())
 	resp := &Response{
-		Request:    req,
-		Start:      time.Now(),
-		Done:       make(chan struct{}, 0),
-		Filename:   req.Filename,
-		ctx:        ctx,
-		cancel:     cancel,
-		bufferSize: req.BufferSize,
+		Request:  req,
+		Start:    time.Now(),
+		Done:     make(chan struct{}, 0),
+		Filename: req.Filename,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	if resp.bufferSize == 0 {
 		// default to Client.BufferSize
@@ -90,6 +90,45 @@ func (c *Client) Do(req *Request) *Response {
 	// already complete or failed.
 	go c.run(resp, c.copyFile)
 	return resp
+}
+
+// DoBatch executes all the given requests using the given number of concurrent
+// workers. Control is passed back to the caller as soon as the workers are
+// initiated.
+//
+// If the requested number of workers is less than one, a worker will be created
+// for every request. I.e. all requests will be executed concurrently.
+//
+// If an error occurs during any of the file transfers it will be accessible via
+// call to the associated Response.Err.
+//
+// The returned Response channel is closed only after all of the given Requests
+// have completed, successfully or otherwise.
+func (c *Client) DoBatch(workers int, requests ...*Request) <-chan *Response {
+	if workers < 1 {
+		workers = len(requests)
+	}
+	reqch := make(chan *Request, len(requests))
+	respch := make(chan *Response, len(requests))
+	wg := sync.WaitGroup{}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			c.DoChannel(reqch, respch)
+			wg.Done()
+		}()
+	}
+
+	// queue requests
+	go func() {
+		for _, req := range requests {
+			reqch <- req
+		}
+		close(reqch)
+		wg.Wait()
+		close(respch)
+	}()
+	return respch
 }
 
 // copy transfers content for a HTTP connection established via Client.do()
@@ -155,45 +194,6 @@ func (c *Client) DoChannel(reqch <-chan *Request, respch chan<- *Response) {
 		respch <- resp
 		<-resp.Done
 	}
-}
-
-// DoBatch executes all the given requests using the given number of concurrent
-// workers. Control is passed back to the caller as soon as the workers are
-// initiated.
-//
-// If the requested number of workers is less than one, a worker will be created
-// for every request. I.e. all requests will be executed concurrently.
-//
-// If an error occurs during any of the file transfers it will be accessible via
-// call to the associated Response.Err.
-//
-// The returned Response channel is closed only after all of the given Requests
-// have completed, successfully or otherwise.
-func (c *Client) DoBatch(workers int, requests ...*Request) <-chan *Response {
-	if workers < 1 {
-		workers = len(requests)
-	}
-	reqch := make(chan *Request, len(requests))
-	respch := make(chan *Response, len(requests))
-	wg := sync.WaitGroup{}
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			c.DoChannel(reqch, respch)
-			wg.Done()
-		}()
-	}
-
-	// queue requests
-	go func() {
-		for _, req := range requests {
-			reqch <- req
-		}
-		close(reqch)
-		wg.Wait()
-		close(respch)
-	}()
-	return respch
 }
 
 // An stateFunc is an action that mutates the state of a Response and returns
@@ -345,6 +345,50 @@ func (c *Client) getRequest(resp *Response) stateFunc {
 	return c.readResponse
 }
 
+// headRequest attempts to obtain the capabilities of the server by making a HEAD request.
+//
+// If resp.optionsKnown is true, the HEAD request has been completed, and the capabilities
+// of the remote server are known. In which case, a GET request is made.
+//
+// Request.NoResume checks if the file being requested to download needs to be resumed, or
+// downloaded from the the beginning. If it requires to be downloaded from the beginning, a
+// GET request is made.
+//
+// If the destination path is already known and does not exist, a GET request is made.
+//
+// Finally, a HEAD request is made to get information about the server, and makes a GET
+// request with the information obtained.
+func (c *Client) headRequest(resp *Response) stateFunc {
+	if resp.optionsKnown {
+		return c.getRequest
+	}
+	resp.optionsKnown = true
+
+	if resp.Request.NoResume {
+		return c.getRequest
+	}
+
+	if resp.Filename != "" && resp.fi == nil {
+		return c.getRequest
+	}
+
+	hreq := new(http.Request)
+	*hreq = *resp.Request.HTTPRequest
+	hreq.Method = "HEAD"
+
+	resp.HTTPResponse, resp.err = c.doHTTPRequest(hreq)
+	if resp.err != nil {
+		return c.closeResponse
+	}
+	resp.HTTPResponse.Body.Close()
+
+	if resp.HTTPResponse.StatusCode != http.StatusOK {
+		return c.getRequest
+	}
+
+	return c.readResponse
+}
+
 // readResponse first checks if the size of the response obtained is as expected. If this
 // is not the case, the response gets closed.
 //
@@ -418,14 +462,28 @@ func (c *Client) openWriter(resp *Response) stateFunc {
 	}
 	resp.writer = f
 
-	// seek to start or end
-	whence := os.SEEK_SET
-	if resp.bytesResumed > 0 {
-		whence = os.SEEK_END
-	}
-	_, resp.err = f.Seek(0, whence)
-	if resp.err != nil {
-		return c.closeResponse
+	byteRange := resp.Request.HTTPRequest.Header.Get("Range")
+	if byteRange != "" {
+		// sample byte range string: "bytes=262144000-272629759"
+		byteRanges := strings.Split(byteRange, "=")
+		byteRanges = strings.Split(byteRanges[1], "-")
+
+		startByte, _ := strconv.ParseInt(byteRanges[0], 10, 64)
+		whence := os.SEEK_SET
+		_, resp.err = f.Seek(startByte, whence)
+		if resp.err != nil {
+			return c.closeResponse
+		}
+	} else {
+		// seek to start or end
+		whence := os.SEEK_SET
+		if resp.bytesResumed > 0 {
+			whence = os.SEEK_END
+		}
+		_, resp.err = f.Seek(0, whence)
+		if resp.err != nil {
+			return c.closeResponse
+		}
 	}
 
 	// init transfer
@@ -489,50 +547,6 @@ func (c *Client) doHTTPRequest(req *http.Request) (*http.Response, error) {
 		req.Header.Set("User-Agent", c.UserAgent)
 	}
 	return c.HTTPClient.Do(req)
-}
-
-// headRequest attempts to obtain the capabilities of the server by making a HEAD request.
-//
-// If resp.optionsKnown is true, the HEAD request has been completed, and the capabilities
-// of the remote server are known. In which case, a GET request is made.
-//
-// Request.NoResume checks if the file being requested to download needs to be resumed, or
-// downloaded from the the beginning. If it requires to be downloaded from the beginning, a
-// GET request is made.
-//
-// If the destination path is already known and does not exist, a GET request is made.
-//
-// Finally, a HEAD request is made to get information about the server, and makes a GET
-// request with the information obtained.
-func (c *Client) headRequest(resp *Response) stateFunc {
-	if resp.optionsKnown {
-		return c.getRequest
-	}
-	resp.optionsKnown = true
-
-	if resp.Request.NoResume {
-		return c.getRequest
-	}
-
-	if resp.Filename != "" && resp.fi == nil {
-		return c.getRequest
-	}
-
-	hreq := new(http.Request)
-	*hreq = *resp.Request.HTTPRequest
-	hreq.Method = "HEAD"
-
-	resp.HTTPResponse, resp.err = c.doHTTPRequest(hreq)
-	if resp.err != nil {
-		return c.closeResponse
-	}
-	resp.HTTPResponse.Body.Close()
-
-	if resp.HTTPResponse.StatusCode != http.StatusOK {
-		return c.getRequest
-	}
-
-	return c.readResponse
 }
 
 // close finalizes the Response

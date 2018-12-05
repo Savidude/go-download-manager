@@ -1,6 +1,7 @@
 package go_download_manager
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -11,9 +12,6 @@ import (
 //
 // An error is returned if caused by client policy (such as CheckRedirect), or
 // if there was an HTTP protocol or IO error.
-//
-// For non-blocking calls or control over HTTP client headers, redirect policy,
-// and other settings, create a Client instead.
 func Get(dst, urlStr string) (*Response, error) {
 	req, err := NewRequest(dst, urlStr)
 	if err != nil {
@@ -22,6 +20,55 @@ func Get(dst, urlStr string) (*Response, error) {
 
 	resp := DefaultClient.Do(req)
 	return resp, resp.Err()
+}
+
+// GetParallel is used to download large files in multiple chunks, where each chunk
+// is downloaded in parallel through multiple HTTP requests.
+func GetParallel(dst, urlStr string, chunkSize int64, workers int) (<-chan *Response, int, error) {
+	req, err := NewRequest(dst, urlStr)
+	if err != nil {
+		return nil, 0, err
+	}
+	// cancel will be called on all code-paths via closeResponse
+	ctx, cancel := context.WithCancel(req.Context())
+	resp := &Response{
+		Request: req,
+		Done:    make(chan struct{}, 0),
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+	// Get the size of the file with a HEAD request
+	client := DefaultClient
+	client.run(resp, client.headRequest)
+
+	// The number of chunks the download file is being split into
+	chunks := (resp.Size / chunkSize) + 1
+	reqs := make([]*Request, chunks)
+
+	// startByte and endByte determines the positions of the chunk that should be downloaded
+	var startByte = int64(0)
+	var endByte = chunkSize - 1
+
+	var count = 0
+	for startByte < resp.Size {
+		req, err := NewRequest(dst, urlStr)
+		if err != nil {
+			return nil, 0, err
+		}
+		if endByte > resp.Size {
+			endByte = resp.Size - 1
+		}
+		rangeHeader := fmt.Sprintf("bytes=%d-%d", startByte, endByte)
+		req.HTTPRequest.Header.Add("Range", rangeHeader)
+		reqs[count] = req
+
+		startByte = endByte + 1
+		endByte += chunkSize
+		count++
+	}
+
+	ch := client.DoBatch(workers, reqs...)
+	return ch, count, nil
 }
 
 // GetBatch sends multiple HTTP requests and downloads the content of the
@@ -38,9 +85,6 @@ func Get(dst, urlStr string) (*Response, error) {
 //
 // If an error occurs during any download, it will be available via call to the
 // associated Response.Err.
-//
-// For control over HTTP client headers, redirect policy, and other settings,
-// create a Client instead.
 func GetBatch(workers int, dst string, urlStrs ...string) (<-chan *Response, error) {
 	fi, err := os.Stat(dst)
 	if err != nil {
